@@ -2,116 +2,125 @@ package com.nio;
 
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.Multimap;
+import lombok.extern.slf4j.Slf4j;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Iterator;
+import java.util.Map;
 
+@Slf4j
 public final class TcpDataFlowExample {
 
-	public static final String HOSTNAME = "0.0.0.0";
-	public static final int[] PORTS = new int[] { 5555, 4444 };
+    public static final String HOSTNAME = "0.0.0.0";
+    public static final int[] PORTS = new int[]{5555, 4444};
 
-	private TcpDataFlowExample() {
-	}
+    private static final Map<Integer, TcpHandlerStrategy> strategyMap = Map.of(
+            5555, new UppercaseEchoHandler(),
+            4444, new CommandControlHandler()
+    );
 
-	public static void main(final String... args) throws Exception {
-		System.out.printf("Tcp Data Flow Example started at %s:%s%n", HOSTNAME, Arrays.toString(PORTS));
-		final Selector selector = Selector.open();
+    private TcpDataFlowExample() {
+    }
 
-		for (final int port : PORTS) {
-			final ServerSocketChannel serverSocket = ServerSocketChannel.open();
-			serverSocket.bind(new InetSocketAddress(HOSTNAME, port));
-			serverSocket.configureBlocking(false);
-			serverSocket.register(selector, SelectionKey.OP_ACCEPT);
-		}
+    public static void main(final String... args) throws Exception {
+        log.info("Tcp Data Flow Example started at {}:{}", HOSTNAME, Arrays.toString(PORTS));
 
-		final ByteBuffer buffer = ByteBuffer.allocate(65535);
-		final Multimap<Integer, SocketChannel> clients = ArrayListMultimap.create();
+        final Selector selector = Selector.open();
 
-		while (!Thread.currentThread().isInterrupted()) {
-			System.out.printf("Wait new events..%n");
-			selector.select();
+        for (final int port : PORTS) {
+            try {
+                final ServerSocketChannel serverSocket = ServerSocketChannel.open();
+                serverSocket.bind(new InetSocketAddress(HOSTNAME, port));
+                serverSocket.configureBlocking(false);
+                serverSocket.register(selector, SelectionKey.OP_ACCEPT);
+            }
+            catch (IOException e) {
+                log.error("Failed to bind to port {}: {}", port, e.getMessage(), e);
+            }
+        }
 
-			final Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
-			iterator.forEachRemaining(selectionKey -> {
-				try {
-					if (selectionKey.isAcceptable()) {
-						System.out.println("Handle READ event");
-						final ServerSocketChannel server = ((ServerSocketChannel) selectionKey.channel());
-						final SocketChannel client = server.accept();
-						client.configureBlocking(false);
-						System.out.printf("New connection accepted: %s%n", client);
+        final Multimap<Integer, SocketChannel> clients = ArrayListMultimap.create();
 
-						clients.put(server.socket().getLocalPort(), client);
+        while (!Thread.currentThread().isInterrupted()) {
+            log.info("Wait new events..");
+            selector.select();
 
-						client.register(selector, SelectionKey.OP_READ);
-					}
+            final Iterator<SelectionKey> iterator = selector.selectedKeys().iterator();
+            iterator.forEachRemaining(selectionKey -> {
+                try {
+                    if (selectionKey.isAcceptable()) {
+                        final ServerSocketChannel server = (ServerSocketChannel) selectionKey.channel();
+                        final SocketChannel client = server.accept();
+                        client.configureBlocking(false);
+                        log.info("New connection accepted: {}", client);
 
-					if (selectionKey.isReadable()) {
-						System.out.println("Handle READ event");
-						final SocketChannel client = (SocketChannel) selectionKey.channel();
-						final int read = client.read(buffer);
+                        int port = server.socket().getLocalPort();
+                        clients.put(port, client);
 
-						if (read == -1) {
-							client.close();
-							client.keyFor(selector).cancel();
-							System.out.printf("The connection was closed: %s%n", client);
-							return;
-						}
+                        client.register(selector, SelectionKey.OP_READ);
+                    }
 
-						buffer.flip();
-						switch (client.socket().getLocalPort()) {
-						case 5555:
-							for (int i = 0; i < buffer.limit(); i++) {
-								buffer.put(i, (byte) Character.toUpperCase(buffer.get(i)));
-							}
-							client.write(buffer);
-							break;
-						case 4444:
-							final String command = StandardCharsets.UTF_8.decode(buffer).toString();
-							final String stopCommand = "stop-read";
-							if (stopCommand.equals(command.trim().toLowerCase())) {
-								System.out.println("Handle stop-read");
-								registerEvent(selector, clients, 0);
-								break;
-							}
-							final String startCommand = "start-read";
-							if (startCommand.equals(command.trim().toLowerCase())) {
-								System.out.println("Handle start-read");
-								registerEvent(selector, clients, SelectionKey.OP_READ);
-								break;
-							}
+                    if (selectionKey.isReadable()) {
+                        final SocketChannel client = (SocketChannel) selectionKey.channel();
+                        final ByteBuffer buffer = allocateBuffer(client);
+                        final int read = client.read(buffer);
 
-							final byte[] unknownCommand = String.format("Supported commands:%n%s%n%s%n", stopCommand, startCommand)
-									.getBytes(StandardCharsets.UTF_8);
-							client.write(ByteBuffer.wrap(unknownCommand));
-							break;
-						}
+                        if (read == -1) {
+                            client.close();
+                            int port = client.socket().getLocalPort();
+                            clients.get(port).remove(client);
+                            selectionKey.cancel();
+                            log.info("The connection was closed: {}", client);
+                            return;
+                        }
 
-						buffer.clear();
-					}
-					iterator.remove();
-				} catch (Exception e) {
-					e.printStackTrace();
-				}
-			});
-		}
-	}
+                        buffer.flip();
+                        int port = client.socket().getLocalPort();
+                        TcpHandlerStrategy handler = strategyMap.get(port);
 
-	private static void registerEvent(final Selector selector, final Multimap<Integer, SocketChannel> clients, final int op) {
-		clients.get(5555).forEach(c -> {
-			try {
-				c.register(selector, op);
-			} catch (Exception e) {
-				e.printStackTrace();
-			}
-		});
-	}
+                        if (handler != null) {
+                            handler.handle(client, buffer, selector, clients);
+                        } else {
+                            log.warn("No handler for port: {}", port);
+
+                        }
+                        buffer.clear();
+                    }
+
+                    iterator.remove();
+                } catch (Exception e) {
+                    log.error("An error occurred while processing the selection key: {}", e.getMessage(), e);
+                }
+            });
+        }
+    }
+
+    private static ByteBuffer allocateBuffer(SocketChannel client) throws IOException {
+
+        int bufferSize = 1024;
+        ByteBuffer buffer = ByteBuffer.allocate(bufferSize);
+        int bytesRead = client.read(buffer);
+
+        while (bytesRead > buffer.remaining()) {
+            bufferSize = buffer.capacity() * 2;
+            ByteBuffer newBuffer = ByteBuffer.allocate(bufferSize);
+
+            buffer.flip();
+            newBuffer.put(buffer);
+
+            buffer = newBuffer;
+
+            bytesRead = client.read(buffer);
+        }
+
+        return buffer;
+    }
+
 }
