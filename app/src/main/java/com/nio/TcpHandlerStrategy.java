@@ -15,5 +15,5 @@ Instead of using the Strategy pattern, a functional approach can be used if the 
 * However, the Strategy pattern follows the Open/Closed and Single Responsibility Principles.
 */
 public interface TcpHandlerStrategy {
-    void handle(SocketChannel client, ByteBuffer buffer, Selector selector, Multimap<Integer, SocketChannel> clients) throws IOException;
+    void handle(SocketChannel client, ByteBuffer buffer) throws IOException;
 }

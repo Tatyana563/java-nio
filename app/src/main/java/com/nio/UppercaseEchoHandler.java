@@ -11,7 +11,7 @@ import com.google.common.collect.Multimap;
 public class UppercaseEchoHandler implements TcpHandlerStrategy {
 
     @Override
-    public void handle(SocketChannel client, ByteBuffer buffer, Selector selector, Multimap<Integer, SocketChannel> clients) throws IOException {
+    public void handle(SocketChannel client, ByteBuffer buffer) throws IOException {
         String input = StandardCharsets.UTF_8.decode(buffer).toString();
         String upper = input.toUpperCase();
         byte[] upperBytes = upper.getBytes(StandardCharsets.UTF_8);
